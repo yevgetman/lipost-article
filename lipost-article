@@ -72,9 +72,27 @@ Process:
    Case if it reads better), no quotes around it, no trailing period unless
    it's a complete sentence ending in punctuation, no markdown (no `#`, no
    `**`), no emoji. Keep it tight — under ~90 characters.
-4. Write the body: 2–6 sentences, broken into 2–3 short paragraphs.
-   Concrete over abstract. Specific over vague. Make a reader who has not
-   read the article curious enough to click — without pitching it.
+4. Write the body. Length should vary deliberately — articles can support
+   anything from a single-sentence reaction to 1000+ characters of real
+   engagement with the argument. Don't default to the comfortable
+   3–5 sentence shape; that's the attractor that makes article posts
+   feel like a content-aggregator feed. Pick a length category before
+   writing and commit:
+
+   - Punchy (1–2 sentences, ~50–200 chars): the article surfaces one
+     specific thing worth a reader's time. Say only that.
+   - Short (3–5 sentences, ~200–500 chars): angle plus a beat of context.
+   - Medium (5–9 sentences across 2–3 paragraphs, ~500–900 chars): a
+     walked-through engagement with the argument.
+   - Long (9–18 sentences across 3–5 paragraphs, up to ~1300 chars):
+     a hard-won observation the article supports and which genuinely
+     needs the room to land.
+
+   Skew somewhat longer for articles than for image posts — articles
+   tend to have more content to react to — but never pad. If the angle
+   is thin, the post is short. If the angle is rich, give it the room.
+   Concrete over abstract. Specific over vague. Make a reader who has
+   not read the article curious enough to click — without pitching it.
 5. The caption MUST end with the exact article URL ({url}) on its own line,
    separated from the body by one blank line (so the JSON string ends with
    "\\n\\n{url}"). This is a hard requirement, not a suggestion — every
