@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+"""lipost-article — turn an article URL into a LinkedIn post.
+
+Pipes an article URL through Claude Code (Opus 4.7) with a voice prompt
+(`prompt.md`) and a formatting style guide (`style.md`), presents the draft
+for review, and posts via the `lipost` CLI on approval.
+
+Single file, stdlib only. Text posts only — image generation is not wired up
+yet.
+
+File lookup for prompt.md / style.md, in order:
+
+    1. Env vars LIPOST_ARTICLE_PROMPT and LIPOST_ARTICLE_STYLE (each
+       independently, if set).
+    2. <script_dir>/prompt.md and <script_dir>/style.md (the conventional
+       location — both are gitignored so you can drop your own in next to
+       the script, or symlink to existing files).
+
+The script errors out with a setup hint if either file is missing.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+REPO_DIR = Path(__file__).resolve().parent
+DEFAULT_STYLE_FILE = REPO_DIR / "style.md"
+DEFAULT_PERSONA_FILE = REPO_DIR / "prompt.md"
+
+
+def _resolve_source(env_var: str, default: Path) -> Path:
+    override = os.environ.get(env_var)
+    return Path(override).expanduser() if override else default
+
+
+STYLE_FILE = _resolve_source("LIPOST_ARTICLE_STYLE", DEFAULT_STYLE_FILE)
+PERSONA_FILE = _resolve_source("LIPOST_ARTICLE_PROMPT", DEFAULT_PERSONA_FILE)
+
+CLAUDE_MODEL = "claude-opus-4-7"
+CLAUDE_TIMEOUT_SECS = 10 * 60
+
+URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+_JSON_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+# ── prompt assembly ────────────────────────────────────────────────────────
+
+ARTICLE_WRAPPER = """\
+You are drafting a LinkedIn post that reacts to a specific article. You are
+NOT publishing — your output is a draft the human will review and approve.
+
+Article URL: {url}
+
+Process:
+1. Fetch the article at the URL above using the WebFetch tool. Read it
+   carefully — not just the headline, the actual argument and the specifics.
+2. Find the one non-obvious thing in the article: a mechanism, a tradeoff, a
+   number, a failure mode, an unstated assumption — whatever a reader with
+   real shipping experience would flag. Don't summarize the whole piece.
+   React to one specific thing.
+3. Write a heading line for the post. This is a hard requirement: every
+   caption begins with a single-line heading. Write it yourself — do NOT
+   copy the article's actual title verbatim. It should frame your angle
+   on the piece, not be a generic restatement. Sentence case (or Title
+   Case if it reads better), no quotes around it, no trailing period unless
+   it's a complete sentence ending in punctuation, no markdown (no `#`, no
+   `**`), no emoji. Keep it tight — under ~90 characters.
+4. Write the body: 2–6 sentences, broken into 2–3 short paragraphs.
+   Concrete over abstract. Specific over vague. Make a reader who has not
+   read the article curious enough to click — without pitching it.
+5. The caption MUST end with the exact article URL ({url}) on its own line,
+   separated from the body by one blank line (so the JSON string ends with
+   "\\n\\n{url}"). This is a hard requirement, not a suggestion — every
+   caption ends with the URL, every time. Do not omit it. Do not paraphrase
+   it. Do not wrap it in markdown or surrounding punctuation. Do not
+   linkify it manually (LinkedIn auto-linkifies bare URLs). The URL line
+   does not count toward the sentence budget.
+
+Final caption shape (in order, with one blank line between each block):
+heading line → body paragraphs → article URL.
+
+Output a single JSON object on stdout — and ONLY that JSON object. No
+preamble, no markdown fence, no explanation:
+
+{{"caption": "<heading line>\\n\\n<body paragraphs>\\n\\n{url}"}}
+
+If the article is off-domain, thin, or you'd be repeating yourself:
+
+{{"skip": true, "reason": "<short explanation>"}}
+
+The persona, audience, voice rules, banned phrases, and length rules from
+the persona block below all apply. The image-specific bits in that block
+(the {{{{IMAGE_PATH}}}} placeholder, the Read-the-image step, the "alt"
+field in the output schema) do NOT apply here — this is a text-only post
+about an article you fetched from the web.
+
+--- PERSONA & VOICE ---
+
+{persona}
+
+--- FORMATTING & PUNCTUATION LAYER (mechanical rules; apply on top of voice
+rules above. These describe HOW the text should look, not WHAT to say.) ---
+
+{style}
+"""
+
+
+_SETUP_HINT = (
+    "Provide one by either:\n"
+    "  - dropping the file at the path above (it's gitignored), or\n"
+    "  - symlinking an existing file there:\n"
+    "      ln -s /path/to/your/{name} {target}\n"
+    "  - or pointing the {env_var} env var at any file."
+)
+
+
+def _require_source(path: Path, kind: str, env_var: str, default_name: str) -> None:
+    if path.exists():
+        return
+    hint = _SETUP_HINT.format(name=default_name, target=path, env_var=env_var)
+    die(f"{kind} not found: {path}\n{hint}")
+
+
+def build_prompt(url: str) -> str:
+    _require_source(PERSONA_FILE, "persona prompt", "LIPOST_ARTICLE_PROMPT", "prompt.md")
+    _require_source(STYLE_FILE, "style guide", "LIPOST_ARTICLE_STYLE", "style.md")
+    return ARTICLE_WRAPPER.format(
+        url=url,
+        persona=PERSONA_FILE.read_text().strip(),
+        style=STYLE_FILE.read_text().strip(),
+    )
+
+
+# ── Claude invocation ──────────────────────────────────────────────────────
+
+def parse_claude_json(stdout: str) -> dict | None:
+    s = (stdout or "").strip()
+    if not s:
+        return None
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
+        pass
+    matches = _JSON_OBJ_RE.findall(s)
+    for m in reversed(matches):
+        try:
+            obj = json.loads(m)
+            if isinstance(obj, dict) and ("caption" in obj or "skip" in obj):
+                return obj
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def run_claude(prompt: str) -> tuple[dict | None, str, str]:
+    """Returns (parsed_json_or_None, status_message, raw_stdout)."""
+    claude_path = shutil.which("claude")
+    if not claude_path:
+        return None, "claude binary not found on PATH", ""
+    try:
+        proc = subprocess.run(
+            [claude_path, "-p", prompt,
+             "--dangerously-skip-permissions",
+             "--model", CLAUDE_MODEL],
+            capture_output=True, text=True, timeout=CLAUDE_TIMEOUT_SECS,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"claude timed out after {CLAUDE_TIMEOUT_SECS}s", ""
+    if proc.returncode != 0:
+        msg = f"claude rc={proc.returncode}"
+        if proc.stderr:
+            msg += f": {proc.stderr.strip()[:300]}"
+        return None, msg, proc.stdout or ""
+    parsed = parse_claude_json(proc.stdout)
+    if not parsed:
+        tail = proc.stdout.strip()[-300:]
+        return None, f"no valid JSON in claude output (last 300 chars: {tail!r})", proc.stdout
+    return parsed, "ok", proc.stdout
+
+
+# ── TUI helpers ────────────────────────────────────────────────────────────
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def prompt_url() -> str:
+    try:
+        s = input("article URL: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        sys.exit(130)
+    if not s:
+        die("no URL provided")
+    if not URL_RE.match(s):
+        die(f"not a URL: {s}")
+    return s
+
+
+def prompt_choice(options: dict[str, str], default: str) -> str:
+    """Show options and return the chosen key. options maps key→description."""
+    parts = []
+    for k, desc in options.items():
+        parts.append(f"[{k.upper() if k == default else k}]{desc}")
+    line = "  ".join(parts)
+    while True:
+        try:
+            raw = input(f"{line}: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            sys.exit(130)
+        if not raw:
+            return default
+        if raw in options:
+            return raw
+        print(f"  pick one of: {', '.join(options.keys())}")
+
+
+def edit_in_editor(initial: str) -> str:
+    """Open $EDITOR on initial text; return the edited text (stripped)."""
+    editor = os.environ.get("EDITOR", "vi")
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".md", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(initial)
+        tmp = f.name
+    try:
+        rc = subprocess.call([editor, tmp])
+        if rc != 0:
+            print(f"editor exited rc={rc}; keeping original")
+            return initial
+        return Path(tmp).read_text().strip()
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+# ── lipost invocation ──────────────────────────────────────────────────────
+
+def lipost_post(caption: str, dry_run: bool = False) -> int:
+    lipost = shutil.which("lipost")
+    if not lipost:
+        die("lipost not found on PATH (install from https://github.com/yevgetman/lipost)")
+    cmd = [lipost, "post"]
+    if dry_run:
+        cmd.append("--dry-run")
+    cmd.append("-")
+    proc = subprocess.run(cmd, input=caption, text=True)
+    return proc.returncode
+
+
+# ── render ─────────────────────────────────────────────────────────────────
+
+BAR = "─" * 72
+
+
+def show_draft(caption: str) -> None:
+    print()
+    print(BAR)
+    print(caption)
+    print(BAR)
+    print(f"({len(caption)} chars)")
+    print()
+
+
+# ── main flow ──────────────────────────────────────────────────────────────
+
+def generate_once(url: str, extra_steer: str = "") -> dict:
+    prompt = build_prompt(url)
+    if extra_steer:
+        prompt += "\n\n--- ADDITIONAL STEERING (from previous round) ---\n\n" + extra_steer
+    print("calling claude (Opus 4.7) — this usually takes 30–90s...", flush=True)
+    parsed, status, _raw = run_claude(prompt)
+    if not parsed:
+        die(f"claude generation failed: {status}")
+    if parsed.get("skip"):
+        die(f"claude skipped: {parsed.get('reason', '(no reason given)')}", code=2)
+    if "caption" not in parsed:
+        die(f"claude returned JSON without a caption: {parsed!r}")
+    return parsed
+
+
+def review_loop(url: str, parsed: dict, dry_run: bool) -> int:
+    caption = parsed["caption"]
+    while True:
+        show_draft(caption)
+        choice = prompt_choice(
+            {"a": "pprove", "e": "dit", "r": "egenerate", "c": "ancel"},
+            default="a",
+        )
+        if choice == "a":
+            print("posting via lipost...")
+            rc = lipost_post(caption, dry_run=dry_run)
+            return rc
+        if choice == "e":
+            edited = edit_in_editor(caption)
+            if not edited:
+                print("(empty after edit; keeping previous draft)")
+                continue
+            caption = edited
+            continue
+        if choice == "r":
+            try:
+                steer = input("steering note for the next draft (optional, enter to skip): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                sys.exit(130)
+            extra = ""
+            if steer:
+                extra = (
+                    "Your previous draft was:\n\n"
+                    + caption
+                    + "\n\nThe human reviewer asked for this change: "
+                    + steer
+                )
+            parsed = generate_once(url, extra_steer=extra)
+            caption = parsed["caption"]
+            continue
+        if choice == "c":
+            print("cancelled.")
+            return 0
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(
+        prog="lipost-article",
+        description="Turn an article URL into a LinkedIn post via Claude, then post via lipost.",
+    )
+    p.add_argument("url", nargs="?", help="article URL (prompted if omitted)")
+    p.add_argument("--dry-run", "-n", action="store_true",
+                   help="pass --dry-run to lipost (do not actually publish)")
+    args = p.parse_args()
+
+    url = args.url or prompt_url()
+    if not URL_RE.match(url):
+        die(f"not a URL: {url}")
+
+    parsed = generate_once(url)
+    return review_loop(url, parsed, dry_run=args.dry_run)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print()
+        sys.exit(130)

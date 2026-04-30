@@ -1,0 +1,15 @@
+# personal — never commit. these are gitignored so users (including the
+# author) can drop their own voice prompt and formatting style guide
+# alongside the script without leaking persona/voice into git.
+prompt.md
+style.md
+
+# python
+__pycache__/
+*.pyc
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
