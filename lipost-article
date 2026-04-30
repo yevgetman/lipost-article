@@ -261,6 +261,31 @@ def lipost_post(caption: str, dry_run: bool = False) -> int:
     return proc.returncode
 
 
+def lipost_bot_queue(caption: str, url: str, status: str) -> int:
+    """Hand the caption off to lipost-bot's draft queue. Sister tool — shells
+    out to its `draft-add` command; never touches its directory layout."""
+    lipost_bot = shutil.which("lipost-bot")
+    if not lipost_bot:
+        die("lipost-bot not found on PATH — install it (https://github.com/yevgetman/lipost-bot) "
+            "to enable queuing.")
+    cmd = [lipost_bot, "draft-add",
+           "--text", "-",
+           "--source", url,
+           "--status", status,
+           "--model", "lipost-article"]
+    proc = subprocess.run(cmd, input=caption, text=True, capture_output=True)
+    if proc.returncode != 0:
+        msg = (proc.stderr or proc.stdout or "").strip()
+        die(f"lipost-bot draft-add failed (rc={proc.returncode}): {msg}")
+    slug = proc.stdout.strip()
+    print(f"queued as draft {slug} (status={status}); will post via lipost-bot's cron.")
+    if status == "pending_approval":
+        print("review with: lipost-bot review")
+    else:
+        print("see queue with: lipost-bot drafts --status approved")
+    return 0
+
+
 # ── render ─────────────────────────────────────────────────────────────────
 
 BAR = "─" * 72
@@ -292,18 +317,25 @@ def generate_once(url: str, extra_steer: str = "") -> dict:
     return parsed
 
 
-def review_loop(url: str, parsed: dict, dry_run: bool) -> int:
+def review_loop(url: str, parsed: dict, dry_run: bool, queue_status: str) -> int:
     caption = parsed["caption"]
     while True:
         show_draft(caption)
         choice = prompt_choice(
-            {"a": "pprove", "e": "dit", "r": "egenerate", "c": "ancel"},
+            {"a": "pprove", "e": "dit", "r": "egenerate",
+             "q": "ueue", "c": "ancel"},
             default="a",
         )
         if choice == "a":
             print("posting via lipost...")
             rc = lipost_post(caption, dry_run=dry_run)
             return rc
+        if choice == "q":
+            if dry_run:
+                print(f"[dry-run] would queue caption with lipost-bot (status={queue_status}); "
+                      f"skipping the actual draft-add call.")
+                return 0
+            return lipost_bot_queue(caption, url, status=queue_status)
         if choice == "e":
             edited = edit_in_editor(caption)
             if not edited:
@@ -340,15 +372,18 @@ def main() -> int:
     )
     p.add_argument("url", nargs="?", help="article URL (prompted if omitted)")
     p.add_argument("--dry-run", "-n", action="store_true",
-                   help="pass --dry-run to lipost (do not actually publish)")
+                   help="pass --dry-run to lipost (do not actually publish); also disables real queuing")
+    p.add_argument("--queue-pending", action="store_true",
+                   help="when [q]ueue is selected, enqueue with status=pending_approval (forces a second review via `lipost-bot review` before posting). Default is status=approved (skips straight into the cron queue).")
     args = p.parse_args()
 
     url = args.url or prompt_url()
     if not URL_RE.match(url):
         die(f"not a URL: {url}")
 
+    queue_status = "pending_approval" if args.queue_pending else "approved"
     parsed = generate_once(url)
-    return review_loop(url, parsed, dry_run=args.dry_run)
+    return review_loop(url, parsed, dry_run=args.dry_run, queue_status=queue_status)
 
 
 if __name__ == "__main__":
