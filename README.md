@@ -1,5 +1,31 @@
 # lipost-article
 
+> **⚠️ DEPRECATED — merged into [yevgetman/lipost](https://github.com/yevgetman/lipost).**
+>
+> This standalone tool is no longer maintained. All functionality is now part of the unified `lipost` suite as the `article` subcommand.
+>
+> **Migration:**
+>
+> ```bash
+> # Install the unified suite
+> git clone https://github.com/yevgetman/lipost.git
+> cd lipost && ./install.sh
+> lipost init      # migrates ~/.config/linkedin-cli/ → ~/.config/lipost/
+>
+> # New invocation
+> lipost article <url>                  # was: lipost-article <url>
+> lipost article <url> --queue          # was: lipost-article <url>  (then [q]ueue)
+> lipost article <url> --queue-pending  # was: lipost-article --queue-pending <url>
+> ```
+>
+> The `lipost-article` binary stops being installed once you symlink the unified `lipost` over the top. After verifying the new flow works, you can remove this repo.
+>
+> ---
+>
+> _The original README follows for historical reference._
+>
+> ---
+
 Turn an article URL into a LinkedIn post.
 
 A small CLI that:
