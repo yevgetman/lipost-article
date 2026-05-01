@@ -65,13 +65,24 @@ Process:
    number, a failure mode, an unstated assumption — whatever a reader with
    real shipping experience would flag. Don't summarize the whole piece.
    React to one specific thing.
-3. Write a heading line for the post. This is a hard requirement: every
-   caption begins with a single-line heading. Write it yourself — do NOT
-   copy the article's actual title verbatim. It should frame your angle
-   on the piece, not be a generic restatement. Sentence case (or Title
-   Case if it reads better), no quotes around it, no trailing period unless
-   it's a complete sentence ending in punctuation, no markdown (no `#`, no
-   `**`), no emoji. Keep it tight — under ~90 characters.
+3. Decide whether the post opens with a heading line. Headings are NOT
+   required on every post — a feed where every post leads with a headline
+   reads like a content-marketing schedule, not a person posting. Use
+   the heading when it earns its place, skip it when it doesn't. Rough
+   rule, tied to the length category you'll pick in step 4:
+
+   - Punchy length: skip the heading. The post itself is the headline.
+   - Short length: skip more often than include (~30% include).
+   - Medium length: include more often than skip (~60% include).
+   - Long length: include almost always (~80% include).
+
+   When you DO include one: write it yourself — do NOT copy the article's
+   actual title verbatim. It should frame your angle on the piece, not be
+   a generic restatement. Sentence case (or Title Case if it reads better),
+   no quotes around it, no trailing period unless it's a complete sentence
+   ending in punctuation, no markdown (no `#`, no `**`), no emoji. Keep it
+   tight — under ~90 characters. Separate it from the body with one blank
+   line. When you SKIP it, the post just opens with the body.
 4. Write the body. Length should vary deliberately — articles can support
    anything from a single-sentence reaction to 1000+ characters of real
    engagement with the argument. Don't default to the comfortable
@@ -101,13 +112,17 @@ Process:
    linkify it manually (LinkedIn auto-linkifies bare URLs). The URL line
    does not count toward the sentence budget.
 
-Final caption shape (in order, with one blank line between each block):
-heading line → body paragraphs → article URL.
+Final caption shape (in order, with one blank line between each block).
+Two valid shapes depending on whether you included a heading:
+
+- With heading: heading line → body paragraphs → article URL.
+- Without heading: body paragraphs → article URL.
 
 Output a single JSON object on stdout — and ONLY that JSON object. No
-preamble, no markdown fence, no explanation:
+preamble, no markdown fence, no explanation. One of these two shapes:
 
-{{"caption": "<heading line>\\n\\n<body paragraphs>\\n\\n{url}"}}
+{{"caption": "<heading>\\n\\n<body paragraphs>\\n\\n{url}"}}
+{{"caption": "<body paragraphs>\\n\\n{url}"}}
 
 If the article is off-domain, thin, or you'd be repeating yourself:
 
